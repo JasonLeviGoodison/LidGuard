@@ -2,26 +2,28 @@
 """
 lid-guard (macOS): Keep your laptop awake on lid close, lock the screen instead.
 
-macOS approach:
-  - Uses IOKit via ctypes to register for lid-open/close events (kIOPMMessageSystemPowerEventOccurred)
-    or polls the lid state via ioreg.
-  - Calls `pmset` to suppress sleep and `caffeinate` to assert a power assertion.
-  - Locks screen via AppleScript (Keychain locking) or /System/Library/CoreServices/Menu Extras/User.menu
-  - Uses a CoreFoundation run loop to receive lid events.
+Activates ONLY when Claude Code or openclaw is running.
+
+How it works:
+  - Watches for 'claude' or 'openclaw' processes (process_watcher.py).
+  - While a watched process is running:
+      * Runs caffeinate to prevent system/display sleep.
+      * On lid close → locks the screen instead of sleeping.
+  - When no watched process is running:
+      * Stops caffeinate — lid close / idle sleep behave normally.
 
 Run directly:
   python3 lid_guard_mac.py
 """
 
-import os
 import sys
 import time
 import signal
 import subprocess
 import logging
 import threading
-import ctypes
-import ctypes.util
+
+from process_watcher import ProcessWatcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,25 +38,7 @@ log = logging.getLogger("lid-guard-mac")
 # ---------------------------------------------------------------------------
 
 def lock_screen() -> bool:
-    """Lock the macOS screen."""
-    methods = [
-        # macOS 10.13+: fastest / most reliable
-        ["open", "-a", "ScreenSaverEngine"],
-        # Lock via pmset (triggers screensaver)
-        # AppleScript
-    ]
-
-    # Try the screensaver engine first (starts screensaver which respects "require password immediately")
-    for cmd in methods:
-        try:
-            result = subprocess.run(cmd, timeout=5, capture_output=True)
-            if result.returncode == 0:
-                log.info("Screen locked via: %s", " ".join(cmd))
-                return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-    # Fallback: AppleScript
+    # Cmd+Ctrl+Q: built-in macOS lock shortcut (10.13+), most reliable
     script = 'tell application "System Events" to keystroke "q" using {command down, control down}'
     try:
         subprocess.run(["osascript", "-e", script], timeout=5, capture_output=True)
@@ -63,7 +47,18 @@ def lock_screen() -> bool:
     except Exception as e:
         log.debug("AppleScript lock failed: %s", e)
 
-    # Last resort: pmset displaysleepnow
+    # Fallback: start the screensaver (locks if "require password immediately" is on)
+    try:
+        result = subprocess.run(
+            ["open", "-a", "ScreenSaverEngine"], timeout=5, capture_output=True
+        )
+        if result.returncode == 0:
+            log.info("Screen locked via ScreenSaverEngine")
+            return True
+    except Exception:
+        pass
+
+    # Last resort: display sleep
     try:
         subprocess.run(["pmset", "displaysleepnow"], timeout=5, capture_output=True)
         log.info("Display sleep triggered via pmset")
@@ -76,49 +71,49 @@ def lock_screen() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Prevent sleep using caffeinate
+# caffeinate guard (prevents sleep)
 # ---------------------------------------------------------------------------
 
 class CaffeinateGuard:
-    """
-    Runs `caffeinate -d -i -s` as a subprocess to prevent sleep.
-
-    Flags:
-      -d  prevent display sleep
-      -i  prevent idle sleep
-      -s  prevent system sleep (requires AC or is ignored on battery)
-    """
+    """Runs caffeinate to hold off system/display sleep. Start/stop dynamically."""
 
     def __init__(self):
         self._proc = None
+        self._lock = threading.Lock()
+
+    @property
+    def active(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
 
     def start(self):
-        try:
-            self._proc = subprocess.Popen(
-                ["caffeinate", "-d", "-i"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            log.info("caffeinate started (pid=%d) — system sleep inhibited", self._proc.pid)
-        except FileNotFoundError:
-            log.error("caffeinate not found — this should be built into macOS")
+        with self._lock:
+            if self.active:
+                return
+            try:
+                self._proc = subprocess.Popen(
+                    ["caffeinate", "-d", "-i"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                log.info("caffeinate started (pid=%d) — sleep inhibited", self._proc.pid)
+            except FileNotFoundError:
+                log.error("caffeinate not found — should be built into macOS")
 
     def stop(self):
-        if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
-            self._proc.wait(timeout=3)
-            log.info("caffeinate stopped — normal sleep restored")
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                self._proc.terminate()
+                self._proc.wait(timeout=3)
+                log.info("caffeinate stopped — normal sleep restored")
+            self._proc = None
 
 
 # ---------------------------------------------------------------------------
 # Lid state monitoring (macOS)
 # ---------------------------------------------------------------------------
 
-def _get_lid_state_ioreg() -> bool | None:
-    """
-    Returns True if lid is closed, False if open, None if unknown.
-    Reads from ioreg: IOPMrootDomain's AppleClamshellState.
-    """
+def _get_lid_state() -> bool | None:
+    """True = closed, False = open, None = unknown. Uses ioreg."""
     try:
         result = subprocess.run(
             ["ioreg", "-r", "-k", "AppleClamshellState", "-d", "4"],
@@ -126,7 +121,7 @@ def _get_lid_state_ioreg() -> bool | None:
         )
         for line in result.stdout.splitlines():
             if "AppleClamshellState" in line:
-                return "Yes" in line or "true" in line.lower() or "1" in line
+                return "Yes" in line or "true" in line.lower()
     except Exception as e:
         log.debug("ioreg lid check failed: %s", e)
     return None
@@ -153,23 +148,18 @@ class LidMonitor:
 
     def _poll_loop(self):
         log.info("Lid monitor started (polling ioreg every %.1fs)", self.POLL_INTERVAL)
-        last_state = _get_lid_state_ioreg()
+        last_state = _get_lid_state()
 
         while self._running:
             time.sleep(self.POLL_INTERVAL)
-            current = _get_lid_state_ioreg()
-
+            current = _get_lid_state()
             if current is None:
                 continue
-
             if last_state is False and current is True:
-                log.info("Lid CLOSED — locking screen")
                 self._on_close()
             elif last_state is True and current is False:
-                log.info("Lid OPENED")
                 if self._on_open:
                     self._on_open()
-
             last_state = current
 
 
@@ -181,11 +171,37 @@ class LidGuard:
 
     def __init__(self):
         self._caffeinate = CaffeinateGuard()
-        self._monitor = LidMonitor(on_close=self._handle_lid_close)
+        self._monitor = LidMonitor(
+            on_close=self._handle_lid_close,
+            on_open=self._handle_lid_open,
+        )
+        self._watcher = ProcessWatcher(
+            on_active=self._on_processes_active,
+            on_idle=self._on_processes_idle,
+        )
         self._stop_event = threading.Event()
 
+    # -- Process watcher callbacks ------------------------------------------
+
+    def _on_processes_active(self):
+        self._caffeinate.start()
+
+    def _on_processes_idle(self):
+        self._caffeinate.stop()
+
+    # -- Lid event callbacks ------------------------------------------------
+
     def _handle_lid_close(self):
-        lock_screen()
+        if self._caffeinate.active:
+            log.info("Lid CLOSED and protection is ACTIVE — locking screen")
+            lock_screen()
+        else:
+            log.info("Lid CLOSED but no watched process running — letting Mac sleep")
+
+    def _handle_lid_open(self):
+        log.info("Lid OPENED")
+
+    # -- Lifecycle ----------------------------------------------------------
 
     def _handle_signal(self, sig, _frame):
         log.info("Received signal %d — shutting down gracefully", sig)
@@ -195,27 +211,29 @@ class LidGuard:
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
 
-        # Verify ioreg works
-        state = _get_lid_state_ioreg()
+        state = _get_lid_state()
         if state is None:
-            log.warning(
-                "Cannot read lid state via ioreg.\n"
-                "  Lid monitoring may not work on this Mac."
-            )
+            log.warning("Cannot read lid state via ioreg — lid monitoring may not work.")
         else:
             log.info("Lid is currently: %s", "CLOSED" if state else "OPEN")
 
-        self._caffeinate.start()
+        self._watcher.start()
         self._monitor.start()
 
         log.info(
             "lid-guard is running.\n"
-            "  Lid close  → screen locks, Mac stays awake\n"
-            "  Ctrl-C / SIGTERM → exit (normal sleep resumes)\n"
+            "  Watching for: claude, openclaw\n"
+            "  Active  → lid close locks screen, Mac stays awake\n"
+            "  Inactive → lid close sleeps normally\n"
+            "  Ctrl-C / SIGTERM to exit\n"
+            "\n"
+            "  Tip: ensure 'Require password immediately' is ON in\n"
+            "  System Settings → Lock Screen"
         )
 
         self._stop_event.wait()
         self._monitor.stop()
+        self._watcher.stop()
         self._caffeinate.stop()
         log.info("lid-guard stopped")
 
@@ -229,13 +247,7 @@ def main():
         print("This script is for macOS. On Linux use: python3 lid_guard.py")
         sys.exit(1)
 
-    # macOS: "require password immediately after sleep or screensaver begins"
-    # must be enabled in System Preferences > Security & Privacy for the lock to work.
-    log.info(
-        "Starting lid-guard (macOS)\n"
-        "  Make sure 'Require password immediately after sleep or screensaver begins'\n"
-        "  is ON in: System Settings → Privacy & Security → Advanced (or Lock Screen)"
-    )
+    log.info("Starting lid-guard (macOS)")
     LidGuard().run()
 
 
