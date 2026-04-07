@@ -102,10 +102,11 @@ class ProcessWatcher:
             current = any_watched_running(self._processes)
 
             if self._active is None:
-                # First poll — just record state, log it, no callback
+                # First poll — record state and fire callback if already active
                 self._active = current
                 if current:
                     log.info("Watched process already running — protection is ACTIVE")
+                    self._on_active()
                 else:
                     log.info("No watched process running — protection is INACTIVE")
 
