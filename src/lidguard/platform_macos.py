@@ -316,17 +316,17 @@ class HotspotRecoveryMonitor:
                 self._reachability_failures = 0
 
     def check_now(self) -> None:
-        if not self._enabled():
+        if not self._hotspot_enabled():
             return
         self._maybe_recover(bypass_cooldown=True)
 
     def force_check(self, reason: str) -> None:
-        if not self._enabled():
+        if not self._hotspot_enabled():
             return
         self._maybe_recover(reason=reason, bypass_cooldown=True)
 
     def _poll_loop(self) -> None:
-        if not self._enabled():
+        if not self._recovery_enabled():
             return
         log.info(
             "Started hotspot recovery monitor (checking every %.1fs).",
@@ -337,7 +337,9 @@ class HotspotRecoveryMonitor:
             self._stop_event.wait(self._poll_interval())
 
     def _maybe_recover(self, reason: str | None = None, bypass_cooldown: bool = False) -> None:
-        if not self._enabled():
+        if reason is None and not self._recovery_enabled():
+            return
+        if reason is not None and not self._hotspot_enabled():
             return
         with self._lock:
             active = self._active
@@ -377,9 +379,12 @@ class HotspotRecoveryMonitor:
         else:
             self._last_attempt = now
 
-    def _enabled(self) -> bool:
+    def _hotspot_enabled(self) -> bool:
+        return bool(self._hotspot.get("enabled"))
+
+    def _recovery_enabled(self) -> bool:
         return bool(
-            self._hotspot.get("enabled")
+            self._hotspot_enabled()
             and self._hotspot.get("force_on_network_loss", True)
         )
 
@@ -467,7 +472,10 @@ class MacOSLidGuard:
 
     def _handle_lid_close(self) -> None:
         if self._caffeinate.active:
-            log.info("Lid closed while protection is active. Connecting hotspot and locking screen.")
+            if self._config.get("hotspot", {}).get("enabled"):
+                log.info("Lid closed while protection is active. Checking hotspot recovery and locking screen.")
+            else:
+                log.info("Lid closed while protection is active. Locking screen.")
             self._hotspot_recovery.force_check("lid closed")
             lock_screen()
         else:

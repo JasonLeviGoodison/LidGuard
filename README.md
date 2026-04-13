@@ -75,7 +75,9 @@ lid-guard setup
 lid-guard run
 ```
 
-Install a background service when you are happy with the behavior:
+`lid-guard setup` can also offer to install the background service for you.
+
+Install a background service directly:
 
 ```bash
 lid-guard service install

@@ -14,6 +14,21 @@ SERVICE_NAME = "lid-guard"
 LAUNCHD_LABEL = "io.github.jasonlevigoodison.lid-guard"
 
 
+def service_file() -> Path:
+    if sys.platform == "linux":
+        return _systemd_service_file()
+    if sys.platform == "darwin":
+        return _launchd_service_file()
+    raise RuntimeError(f"Unsupported platform: {sys.platform}")
+
+
+def service_installed() -> bool:
+    try:
+        return service_file().exists()
+    except RuntimeError:
+        return False
+
+
 def install_service(enable: bool = True) -> Path:
     wrapper = _write_wrapper_script()
     if sys.platform == "linux":
@@ -110,7 +125,7 @@ def _write_wrapper_script() -> Path:
 def _launch_command() -> tuple[list[str], str | None]:
     entrypoint = Path(sys.argv[0]).resolve()
     if entrypoint.exists() and (entrypoint.suffix == ".pyz" or entrypoint.name == SERVICE_NAME):
-        return [str(entrypoint), "run"], None
+        return [sys.executable, str(entrypoint), "run"], None
     return [sys.executable, "-m", "lidguard", "run"], _source_pythonpath()
 
 

@@ -56,14 +56,43 @@ def config_file() -> Path:
     return config_dir() / "config.json"
 
 
+def legacy_config_file() -> Path | None:
+    if os.environ.get("LID_GUARD_CONFIG_HOME") or sys.platform != "darwin":
+        return None
+    return Path.home() / ".config" / APP_NAME / "config.json"
+
+
+def config_file_candidates() -> tuple[Path, ...]:
+    primary = config_file()
+    legacy = legacy_config_file()
+    if legacy is None or legacy == primary:
+        return (primary,)
+    return (primary, legacy)
+
+
+def existing_config_file() -> Path | None:
+    for path in config_file_candidates():
+        if path.exists():
+            return path
+    return None
+
+
+def active_config_file() -> Path:
+    return existing_config_file() or config_file()
+
+
 def default_config() -> dict[str, Any]:
     return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def load_config() -> dict[str, Any]:
-    path = config_file()
-    if not path.exists():
+    path = existing_config_file()
+    if path is None:
         return default_config()
+
+    legacy = legacy_config_file()
+    if legacy is not None and path == legacy:
+        log.info("Loaded legacy macOS config from %s.", path)
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -248,6 +277,7 @@ def scan_wifi_networks() -> list[str]:
 def run_setup(
     input_func: Callable[[str], str] = input,
     output_func: Callable[[str], None] = print,
+    service_installer: Callable[[bool], Path] | None = None,
 ) -> dict[str, Any]:
     config = load_config()
 
@@ -304,7 +334,33 @@ def run_setup(
     path = save_config(config)
     output_func("")
     output_func(f"Saved settings to {path}")
-    output_func("Start the daemon with: lid-guard run")
+    installed_service = False
+    if sys.platform in {"linux", "darwin"}:
+        output_func("")
+        output_func("Would you like lid-guard to keep running automatically in the background?")
+        install_background = _prompt_bool(
+            "Install background service?",
+            False,
+            input_func=input_func,
+            output_func=output_func,
+        )
+        if install_background:
+            installer = service_installer
+            if installer is None:
+                from .service import install_service as installer
+
+            try:
+                service_path = installer(True)
+            except RuntimeError as exc:
+                output_func(f"Could not install background service: {exc}")
+            else:
+                installed_service = True
+                output_func(f"Installed background service: {service_path}")
+
+    if not installed_service:
+        output_func("Start lid-guard with: lid-guard run")
+        if sys.platform in {"linux", "darwin"}:
+            output_func("Optional: lid-guard service install")
     output_func("")
     return config
 

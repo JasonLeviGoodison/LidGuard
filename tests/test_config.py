@@ -34,6 +34,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded["watched_processes"], ["claude", "codex", "openclaw"])
         self.assertFalse(loaded["hotspot"]["enabled"])
 
+    def test_load_config_uses_legacy_macos_config_when_primary_missing(self) -> None:
+        home = Path(self.temp_dir.name) / "home"
+        legacy = home / ".config" / "lid-guard" / "config.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(
+            json.dumps({"hotspot": {"enabled": True, "ssid": "Phone"}}),
+            encoding="utf-8",
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {"LID_GUARD_CONFIG_HOME": "", "LID_GUARD_DATA_HOME": ""},
+            clear=False,
+        ), mock.patch.object(config.sys, "platform", "darwin"), mock.patch(
+            "lidguard.config.Path.home",
+            return_value=home,
+        ):
+            loaded = config.load_config()
+            active = config.active_config_file()
+
+        self.assertTrue(loaded["hotspot"]["enabled"])
+        self.assertEqual(loaded["hotspot"]["ssid"], "Phone")
+        self.assertEqual(active, legacy)
+
     def test_save_config_normalizes_values(self) -> None:
         path = config.save_config(
             {
@@ -55,7 +79,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(saved["hotspot"]["internet_check_failures_before_force"], 3)
 
     def test_run_setup_updates_watched_processes(self) -> None:
-        answers = iter(["codex, aider"])
+        answers = iter(["codex, aider", ""])
         output: list[str] = []
 
         with mock.patch.object(config.sys, "platform", "linux"):
@@ -66,6 +90,21 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(result["watched_processes"], ["codex", "aider"])
         self.assertIn("Saved settings", "\n".join(output))
+
+    def test_run_setup_can_install_background_service(self) -> None:
+        answers = iter(["", "y"])
+        output: list[str] = []
+        installer = mock.Mock(return_value=Path("/tmp/lid-guard.service"))
+
+        with mock.patch.object(config.sys, "platform", "linux"):
+            config.run_setup(
+                input_func=lambda prompt: next(answers),
+                output_func=output.append,
+                service_installer=installer,
+            )
+
+        installer.assert_called_once_with(True)
+        self.assertIn("Installed background service", "\n".join(output))
 
     def test_normalize_config_populates_hotspot_failover_defaults(self) -> None:
         normalized = config.normalize_config({"hotspot": {"enabled": True, "ssid": "Phone"}})

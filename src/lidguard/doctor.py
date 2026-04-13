@@ -5,8 +5,9 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import config_file, data_dir, load_config
+from .config import active_config_file, data_dir, load_config
 from .process_watcher import probe_process_listing
+from .service import service_file, service_installed
 
 
 @dataclass(slots=True)
@@ -17,7 +18,8 @@ class CheckResult:
     fix_hint: str = ""
 
 
-def collect_checks() -> list[CheckResult]:
+def collect_checks(config: dict | None = None) -> list[CheckResult]:
+    current = config if config is not None else load_config()
     checks = [
         _config_parent_check(),
         _data_dir_parent_check(),
@@ -69,12 +71,20 @@ def collect_checks() -> list[CheckResult]:
                     if shutil.which("systemctl") is None
                     else "",
                 ),
+                CheckResult(
+                    name="Background service",
+                    ok=service_installed(),
+                    detail=f"Installed at {service_file()}."
+                    if service_installed()
+                    else "User service is not installed.",
+                    fix_hint="Run: lid-guard service install" if not service_installed() else "",
+                ),
             ]
         )
     elif os.sys.platform == "darwin":
         from .platform_macos import read_lid_state
 
-        hotspot_enabled = bool(load_config().get("hotspot", {}).get("enabled"))
+        hotspot_enabled = bool(current.get("hotspot", {}).get("enabled"))
         checks.extend(
             [
                 _command_check("caffeinate", "caffeinate"),
@@ -101,6 +111,14 @@ def collect_checks() -> list[CheckResult]:
                     if read_lid_state() is None
                     else "",
                 ),
+                CheckResult(
+                    name="Background service",
+                    ok=service_installed(),
+                    detail=f"Installed at {service_file()}."
+                    if service_installed()
+                    else "LaunchAgent is not installed.",
+                    fix_hint="Run: lid-guard service install" if not service_installed() else "",
+                ),
             ]
         )
     else:
@@ -118,12 +136,12 @@ def collect_checks() -> list[CheckResult]:
 
 def render_report() -> tuple[int, str]:
     config = load_config()
-    checks = collect_checks()
+    checks = collect_checks(config)
     failing = [check for check in checks if not check.ok]
     lines = [
         "lid-guard doctor",
         "",
-        f"Config file: {config_file()}",
+        f"Config file: {active_config_file()}",
         f"Data dir:    {data_dir()}",
         f"Processes:   {', '.join(config['watched_processes'])}",
     ]
@@ -149,7 +167,7 @@ def render_report() -> tuple[int, str]:
 
 
 def _config_parent_check() -> CheckResult:
-    path = config_file()
+    path = active_config_file()
     parent = _nearest_existing_parent(path.parent)
     writable = os.access(parent, os.W_OK)
     return CheckResult(

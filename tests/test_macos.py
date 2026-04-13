@@ -57,3 +57,28 @@ class MacOSHotspotTests(unittest.TestCase):
         self.assertIsNone(status.internet_reachable)
         reachable_mock.assert_not_called()
 
+    def test_force_check_connects_on_lid_close_without_failover_monitor(self) -> None:
+        config = config_module.default_config()
+        config["hotspot"]["enabled"] = True
+        config["hotspot"]["ssid"] = "Phone"
+        config["hotspot"]["force_on_network_loss"] = False
+        monitor = platform_macos.HotspotRecoveryMonitor(config)
+        monitor.set_active(True)
+        status = platform_macos.NetworkStatus(
+            associated=True,
+            ssid="Office",
+            ip_address="192.168.1.10",
+            internet_reachable=True,
+        )
+
+        with mock.patch("lidguard.platform_macos.current_network_status", return_value=status), mock.patch(
+            "lidguard.platform_macos.maybe_connect_hotspot",
+            return_value=True,
+        ) as connect_mock:
+            monitor.force_check("lid closed")
+
+        connect_mock.assert_called_once_with(
+            config,
+            reason="lid closed",
+            force_reconnect=False,
+        )
