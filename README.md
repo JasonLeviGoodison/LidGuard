@@ -169,7 +169,6 @@ python3 scripts/build_zipapp.py
 Install for development:
 
 ```bash
-python3 -m pip install wheel
 python3 -m pip install --no-build-isolation .
 ```
 

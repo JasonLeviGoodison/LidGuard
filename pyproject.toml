@@ -1,6 +1,7 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = []
+build-backend = "build_backend"
+backend-path = ["."]
 
 [project]
 name = "lid-guard"
@@ -36,9 +37,3 @@ Issues = "https://github.com/JasonLeviGoodison/AlwaysGrinding/issues"
 
 [project.scripts]
 lid-guard = "lidguard.cli:main"
-
-[tool.setuptools]
-package-dir = { "" = "src" }
-
-[tool.setuptools.packages.find]
-where = ["src"]
